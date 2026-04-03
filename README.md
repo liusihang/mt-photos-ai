@@ -1,7 +1,7 @@
 # MT Photos AI识别相关任务独立部署项目
 
 - 基于PaddleOCR实现的文本识别(OCR)接口
-- 基于Chinese-CLIP（OpenAI CLIP模型的中文版本）实现的图片、文本提取特征接口
+- 基于CLIP/SigLIP2模型实现的图片、文本提取特征接口（CUDA版本已切换为Transformers推理）
 
 
 ### 更新日志
@@ -15,8 +15,10 @@
 
 - cuda版本提升至12.4
 - 移除对paddle框架的依赖，大幅降低镜像大小 （cuda镜像约 7.6G）
-- 将OCR和CLIP ViT-B-16模型内置到镜像内，避免因网络问题导致下载模型失败
+- OCR模型内置到镜像内；CLIP/SigLIP2模型通过Transformers按 `CLIP_MODEL` 动态加载
 - 同步onnx文件夹其他改动
+
+> **迁移注意**：切换向量模型后，特征维度会发生变化（例如 cn-clip ViT-B-16 为 512 维，SigLIP2-base 为 768 维），旧索引向量与新模型不兼容。升级后需要**重新索引所有照片**，否则搜索结果将不正确。
 
 
 
@@ -24,7 +26,7 @@
 
 - openvino：基于rapidocr_openvino库，进行识别任务。**适用于Intel Xeon、Core CPU运行**
 - onnx：基于rapidocr_onnxruntime库，进行识别任务。**适用于所有CPU运行**
-- cuda：基于paddleocr官方库，进行识别任务。**适用于支持CUDA的显卡运行**
+- cuda：基于RapidOCR + Transformers（CLIP/SigLIP2）进行识别任务。**适用于支持CUDA的显卡运行**
 - coreml：CLIP任务使用CoreML加速。**适用于M系列处理器MAC电脑运行**
   
 > 在Intel cpu上运行时OpenVINO版本会快很多；
@@ -59,6 +61,12 @@ docker run -i -p 8060:8060 -e API_AUTH_KEY=mt_photos_ai_extra --name mt-photos-a
 ```
 `cuda-latest`可以替换为`latest`、`cpu-latest`
 
+如需在CUDA版本指定模型，可增加环境变量（示例）：
+
+```bash
+-e CLIP_MODEL=google/siglip2-base-patch16-224
+```
+
 
 ### 下载源码本地运行
 
@@ -66,6 +74,9 @@ docker run -i -p 8060:8060 -e API_AUTH_KEY=mt_photos_ai_extra --name mt-photos-a
 - 根据硬件环境选择cuda、onnx或openvino文件夹
 - 在选择文件夹下执行`pip install -r requirements.txt`
 - 复制`.env.example`生成`.env`文件，然后修改`.env`文件内的API_AUTH_KEY
+- CUDA版本如需切换向量模型，请在环境变量中设置 `CLIP_MODEL`（例如 `google/siglip2-base-patch16-224`）
+- 为兼容旧配置，`ViT-B-16` / `ViT-L-14` / `ViT-H-14` 会自动映射到 `OFA-Sys/chinese-clip-vit-*` 系列模型
+- 国内环境如无法下载模型，可设置 `HF_ENDPOINT=https://hf-mirror.com`
 - 执行 `python server.py` ，启动服务
 
 > paddlepaddle-gpu 安装请根据CUDA版本 

@@ -9,11 +9,12 @@ import cv2
 import asyncio
 # from paddleocr import PaddleOCR
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageFile
 from io import BytesIO
 from pydantic import BaseModel
 from rapidocr import RapidOCR  # Paddle的cuda镜像太大，改用torch，RapidOCR支持torch
-import cn_clip.clip as clip
+from transformers import AutoModel, AutoProcessor
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 on_linux = sys.platform.startswith('linux')
@@ -27,14 +28,22 @@ server_restart_time = int(os.getenv("SERVER_RESTART_TIME", "300"))
 env_auto_load_txt_modal = os.getenv("AUTO_LOAD_TXT_MODAL", "off") == "on" # 是否自动加载CLIP文本模型，开启可以优化第一次搜索时的响应速度,文本模型占用700多m内存
 
 clip_model_name = os.getenv("CLIP_MODEL")
+legacy_clip_model_aliases = {
+    # cn-clip 历史模型名 → transformers 版 Chinese-CLIP（保持中文能力）
+    "ViT-B-16": "OFA-Sys/chinese-clip-vit-base-patch16",
+    "ViT-L-14": "OFA-Sys/chinese-clip-vit-large-patch14",
+    "ViT-H-14": "OFA-Sys/chinese-clip-vit-huge-patch14",
+}
 
 
 ocr_model = None
 clip_processor = None
 clip_model = None
+resolved_clip_model_name = None
 
 restart_task = None
 restart_lock = asyncio.Lock()
+_clip_load_lock = __import__('threading').Lock()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -56,11 +65,61 @@ def load_ocr_model():
 def load_clip_model():
     global clip_processor
     global clip_model
-    if clip_processor is None:
-        model, preprocess = clip.load_from_name(clip_model_name, device=device)
+    global resolved_clip_model_name
+    if not clip_model_name:
+        raise RuntimeError("CLIP_MODEL is required, for example: google/siglip2-base-patch16-224")
+    if clip_processor is not None:
+        return
+    selected_model_name = legacy_clip_model_aliases.get(clip_model_name, clip_model_name)
+    with _clip_load_lock:
+        if clip_processor is not None:
+            return  # double-check after acquiring lock
+        if selected_model_name != clip_model_name:
+            print(f"[compat] CLIP_MODEL={clip_model_name} is a legacy cn-clip alias. Using {selected_model_name} instead.")
+        try:
+            model = AutoModel.from_pretrained(selected_model_name)
+        except Exception as e:
+            hf_endpoint = os.getenv("HF_ENDPOINT", "")
+            hint = (
+                f"Failed to load model '{selected_model_name}': {e}\n"
+                "Hint: If you are behind a firewall, set HF_ENDPOINT (e.g. https://hf-mirror.com) "
+                "or download the model manually and set CLIP_MODEL to the local path."
+            )
+            if hf_endpoint:
+                hint += f"\nCurrent HF_ENDPOINT={hf_endpoint}"
+            raise RuntimeError(hint) from e
         model.eval()
-        clip_model = model
-        clip_processor = preprocess
+        clip_model = model.to(device)
+        clip_processor = AutoProcessor.from_pretrained(selected_model_name)
+        resolved_clip_model_name = selected_model_name
+
+
+def get_normalized_image_features(image_obj):
+    inputs = clip_processor(images=image_obj, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.inference_mode():
+        if hasattr(clip_model, "get_image_features"):
+            image_features = clip_model.get_image_features(**inputs)
+        else:
+            outputs = clip_model(**inputs)
+            image_features = getattr(outputs, "image_embeds", None)
+            if image_features is None:
+                raise RuntimeError("current model does not provide image embeddings")
+    return F.normalize(image_features, dim=-1)
+
+
+def get_normalized_text_features(text):
+    inputs = clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.inference_mode():
+        if hasattr(clip_model, "get_text_features"):
+            text_features = clip_model.get_text_features(**inputs)
+        else:
+            outputs = clip_model(**inputs)
+            text_features = getattr(outputs, "text_embeds", None)
+            if text_features is None:
+                raise RuntimeError("current model does not provide text embeddings")
+    return F.normalize(text_features, dim=-1)
 
 @app.on_event("startup")
 async def startup_event():
@@ -163,7 +222,9 @@ async def check_req(api_key: str = Depends(verify_header)):
         'result': 'pass',
         "title": "mt-photos-ai服务",
         "help": "https://mtmt.tech/docs/advanced/ocr_api",
-        "device": device
+        "device": device,
+        "clip_model": clip_model_name,
+        "clip_model_resolved": resolved_clip_model_name or legacy_clip_model_aliases.get(clip_model_name, clip_model_name)
     }
 
 
@@ -204,8 +265,8 @@ async def clip_process_image(file: UploadFile = File(...), api_key: str = Depend
     load_clip_model()
     image_bytes = await file.read()
     try:
-        image = clip_processor(Image.open(BytesIO(image_bytes))).unsqueeze(0).to(device)
-        image_features = clip_model.encode_image(image)
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        image_features = get_normalized_image_features(image)
         return {'result': ["{:.16f}".format(vec) for vec in image_features[0]]}
     except Exception as e:
         print(e)
@@ -214,8 +275,7 @@ async def clip_process_image(file: UploadFile = File(...), api_key: str = Depend
 @app.post("/clip/txt")
 async def clip_process_txt(request:ClipTxtRequest, api_key: str = Depends(verify_header)):
     load_clip_model()
-    text = clip.tokenize([request.text]).to(device)
-    text_features = clip_model.encode_text(text)
+    text_features = get_normalized_text_features(request.text)
     return {'result': ["{:.16f}".format(vec) for vec in text_features[0]]}
 
 async def predict(predict_func, inputs):
