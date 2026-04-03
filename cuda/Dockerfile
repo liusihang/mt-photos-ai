@@ -27,9 +27,9 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt --index-url=https://pypi.tuna.tsinghua.edu.cn/simple/
 
 ENV API_AUTH_KEY=mt_photos_ai_extra
-ENV CLIP_MODEL=ViT-B-16
+ENV CLIP_MODEL=google/siglip2-base-patch16-224
 
-COPY ./models/clip_cn_vit-b-16.pt /root/.cache/clip/clip_cn_vit-b-16.pt
+# SigLIP2 通过 transformers 动态下载，不再需要 cn-clip 本地权重文件
 COPY ./models/rapidocr/ /opt/conda/lib/python3.11/site-packages/rapidocr/models/
 
 

@@ -9,11 +9,12 @@ import cv2
 import asyncio
 # from paddleocr import PaddleOCR
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageFile
 from io import BytesIO
 from pydantic import BaseModel
 from rapidocr import RapidOCR  # Paddle的cuda镜像太大，改用torch，RapidOCR支持torch
-import cn_clip.clip as clip
+from transformers import AutoModel, AutoProcessor
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 on_linux = sys.platform.startswith('linux')
@@ -35,6 +36,7 @@ clip_model = None
 
 restart_task = None
 restart_lock = asyncio.Lock()
+clip_model_lock = asyncio.Lock()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -56,11 +58,41 @@ def load_ocr_model():
 def load_clip_model():
     global clip_processor
     global clip_model
+    if not clip_model_name:
+        raise RuntimeError("CLIP_MODEL is required, for example: google/siglip2-base-patch16-224")
     if clip_processor is None:
-        model, preprocess = clip.load_from_name(clip_model_name, device=device)
+        model = AutoModel.from_pretrained(clip_model_name)
         model.eval()
-        clip_model = model
-        clip_processor = preprocess
+        clip_model = model.to(device)
+        clip_processor = AutoProcessor.from_pretrained(clip_model_name)
+
+
+def get_normalized_image_features(image_obj):
+    inputs = clip_processor(images=image_obj, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.inference_mode():
+        if hasattr(clip_model, "get_image_features"):
+            image_features = clip_model.get_image_features(**inputs)
+        else:
+            outputs = clip_model(**inputs)
+            image_features = getattr(outputs, "image_embeds", None)
+            if image_features is None:
+                raise RuntimeError("current model does not provide image embeddings")
+    return F.normalize(image_features, dim=-1)
+
+
+def get_normalized_text_features(text):
+    inputs = clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.inference_mode():
+        if hasattr(clip_model, "get_text_features"):
+            text_features = clip_model.get_text_features(**inputs)
+        else:
+            outputs = clip_model(**inputs)
+            text_features = getattr(outputs, "text_embeds", None)
+            if text_features is None:
+                raise RuntimeError("current model does not provide text embeddings")
+    return F.normalize(text_features, dim=-1)
 
 @app.on_event("startup")
 async def startup_event():
@@ -163,7 +195,8 @@ async def check_req(api_key: str = Depends(verify_header)):
         'result': 'pass',
         "title": "mt-photos-ai服务",
         "help": "https://mtmt.tech/docs/advanced/ocr_api",
-        "device": device
+        "device": device,
+        "clip_model": clip_model_name
     }
 
 
@@ -201,11 +234,12 @@ async def process_image(file: UploadFile = File(...), api_key: str = Depends(ver
 
 @app.post("/clip/img")
 async def clip_process_image(file: UploadFile = File(...), api_key: str = Depends(verify_header)):
-    load_clip_model()
+    async with clip_model_lock:
+        load_clip_model()
     image_bytes = await file.read()
     try:
-        image = clip_processor(Image.open(BytesIO(image_bytes))).unsqueeze(0).to(device)
-        image_features = clip_model.encode_image(image)
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        image_features = get_normalized_image_features(image)
         return {'result': ["{:.16f}".format(vec) for vec in image_features[0]]}
     except Exception as e:
         print(e)
@@ -213,9 +247,9 @@ async def clip_process_image(file: UploadFile = File(...), api_key: str = Depend
 
 @app.post("/clip/txt")
 async def clip_process_txt(request:ClipTxtRequest, api_key: str = Depends(verify_header)):
-    load_clip_model()
-    text = clip.tokenize([request.text]).to(device)
-    text_features = clip_model.encode_text(text)
+    async with clip_model_lock:
+        load_clip_model()
+    text_features = get_normalized_text_features(request.text)
     return {'result': ["{:.16f}".format(vec) for vec in text_features[0]]}
 
 async def predict(predict_func, inputs):
