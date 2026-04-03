@@ -28,11 +28,18 @@ server_restart_time = int(os.getenv("SERVER_RESTART_TIME", "300"))
 env_auto_load_txt_modal = os.getenv("AUTO_LOAD_TXT_MODAL", "off") == "on" # 是否自动加载CLIP文本模型，开启可以优化第一次搜索时的响应速度,文本模型占用700多m内存
 
 clip_model_name = os.getenv("CLIP_MODEL")
+legacy_clip_model_aliases = {
+    # cn-clip 历史模型名，向后兼容到 transformers 模型
+    "ViT-B-16": "openai/clip-vit-base-patch16",
+    "ViT-L-14": "openai/clip-vit-large-patch14",
+    "ViT-H-14": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+}
 
 
 ocr_model = None
 clip_processor = None
 clip_model = None
+resolved_clip_model_name = None
 
 restart_task = None
 restart_lock = asyncio.Lock()
@@ -58,13 +65,18 @@ def load_ocr_model():
 def load_clip_model():
     global clip_processor
     global clip_model
+    global resolved_clip_model_name
     if not clip_model_name:
         raise RuntimeError("CLIP_MODEL is required, for example: google/siglip2-base-patch16-224")
+    selected_model_name = legacy_clip_model_aliases.get(clip_model_name, clip_model_name)
     if clip_processor is None:
-        model = AutoModel.from_pretrained(clip_model_name)
+        if selected_model_name != clip_model_name:
+            print(f"[compat] CLIP_MODEL={clip_model_name} is a legacy cn-clip alias. Using {selected_model_name} instead.")
+        model = AutoModel.from_pretrained(selected_model_name)
         model.eval()
         clip_model = model.to(device)
-        clip_processor = AutoProcessor.from_pretrained(clip_model_name)
+        clip_processor = AutoProcessor.from_pretrained(selected_model_name)
+        resolved_clip_model_name = selected_model_name
 
 
 def get_normalized_image_features(image_obj):
@@ -196,7 +208,8 @@ async def check_req(api_key: str = Depends(verify_header)):
         "title": "mt-photos-ai服务",
         "help": "https://mtmt.tech/docs/advanced/ocr_api",
         "device": device,
-        "clip_model": clip_model_name
+        "clip_model": clip_model_name,
+        "clip_model_resolved": resolved_clip_model_name or legacy_clip_model_aliases.get(clip_model_name, clip_model_name)
     }
 
 

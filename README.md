@@ -73,6 +73,7 @@ docker run -i -p 8060:8060 -e API_AUTH_KEY=mt_photos_ai_extra --name mt-photos-a
 - 在选择文件夹下执行`pip install -r requirements.txt`
 - 复制`.env.example`生成`.env`文件，然后修改`.env`文件内的API_AUTH_KEY
 - CUDA版本如需切换向量模型，请在环境变量中设置 `CLIP_MODEL`（例如 `google/siglip2-base-patch16-224`）
+- 为兼容旧配置，`ViT-B-16` / `ViT-L-14` / `ViT-H-14` 会自动映射到对应的 Transformers 模型
 - 执行 `python server.py` ，启动服务
 
 > paddlepaddle-gpu 安装请根据CUDA版本 
