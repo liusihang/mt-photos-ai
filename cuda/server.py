@@ -29,10 +29,10 @@ env_auto_load_txt_modal = os.getenv("AUTO_LOAD_TXT_MODAL", "off") == "on" # 是�
 
 clip_model_name = os.getenv("CLIP_MODEL")
 legacy_clip_model_aliases = {
-    # cn-clip 历史模型名，向后兼容到 transformers 模型
-    "ViT-B-16": "openai/clip-vit-base-patch16",
-    "ViT-L-14": "openai/clip-vit-large-patch14",
-    "ViT-H-14": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    # cn-clip 历史模型名 → transformers 版 Chinese-CLIP（保持中文能力）
+    "ViT-B-16": "OFA-Sys/chinese-clip-vit-base-patch16",
+    "ViT-L-14": "OFA-Sys/chinese-clip-vit-large-patch14",
+    "ViT-H-14": "OFA-Sys/chinese-clip-vit-huge-patch14",
 }
 
 
@@ -43,7 +43,7 @@ resolved_clip_model_name = None
 
 restart_task = None
 restart_lock = asyncio.Lock()
-clip_model_lock = asyncio.Lock()
+_clip_load_lock = __import__('threading').Lock()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -68,11 +68,26 @@ def load_clip_model():
     global resolved_clip_model_name
     if not clip_model_name:
         raise RuntimeError("CLIP_MODEL is required, for example: google/siglip2-base-patch16-224")
+    if clip_processor is not None:
+        return
     selected_model_name = legacy_clip_model_aliases.get(clip_model_name, clip_model_name)
-    if clip_processor is None:
+    with _clip_load_lock:
+        if clip_processor is not None:
+            return  # double-check after acquiring lock
         if selected_model_name != clip_model_name:
             print(f"[compat] CLIP_MODEL={clip_model_name} is a legacy cn-clip alias. Using {selected_model_name} instead.")
-        model = AutoModel.from_pretrained(selected_model_name)
+        try:
+            model = AutoModel.from_pretrained(selected_model_name)
+        except Exception as e:
+            hf_endpoint = os.getenv("HF_ENDPOINT", "")
+            hint = (
+                f"Failed to load model '{selected_model_name}': {e}\n"
+                "Hint: If you are behind a firewall, set HF_ENDPOINT (e.g. https://hf-mirror.com) "
+                "or download the model manually and set CLIP_MODEL to the local path."
+            )
+            if hf_endpoint:
+                hint += f"\nCurrent HF_ENDPOINT={hf_endpoint}"
+            raise RuntimeError(hint) from e
         model.eval()
         clip_model = model.to(device)
         clip_processor = AutoProcessor.from_pretrained(selected_model_name)
@@ -247,8 +262,7 @@ async def process_image(file: UploadFile = File(...), api_key: str = Depends(ver
 
 @app.post("/clip/img")
 async def clip_process_image(file: UploadFile = File(...), api_key: str = Depends(verify_header)):
-    async with clip_model_lock:
-        load_clip_model()
+    load_clip_model()
     image_bytes = await file.read()
     try:
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
@@ -260,8 +274,7 @@ async def clip_process_image(file: UploadFile = File(...), api_key: str = Depend
 
 @app.post("/clip/txt")
 async def clip_process_txt(request:ClipTxtRequest, api_key: str = Depends(verify_header)):
-    async with clip_model_lock:
-        load_clip_model()
+    load_clip_model()
     text_features = get_normalized_text_features(request.text)
     return {'result': ["{:.16f}".format(vec) for vec in text_features[0]]}
 

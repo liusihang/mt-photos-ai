@@ -18,6 +18,8 @@
 - OCR模型内置到镜像内；CLIP/SigLIP2模型通过Transformers按 `CLIP_MODEL` 动态加载
 - 同步onnx文件夹其他改动
 
+> **迁移注意**：切换向量模型后，特征维度会发生变化（例如 cn-clip ViT-B-16 为 512 维，SigLIP2-base 为 768 维），旧索引向量与新模型不兼容。升级后需要**重新索引所有照片**，否则搜索结果将不正确。
+
 
 
 ## 目录说明
@@ -73,7 +75,8 @@ docker run -i -p 8060:8060 -e API_AUTH_KEY=mt_photos_ai_extra --name mt-photos-a
 - 在选择文件夹下执行`pip install -r requirements.txt`
 - 复制`.env.example`生成`.env`文件，然后修改`.env`文件内的API_AUTH_KEY
 - CUDA版本如需切换向量模型，请在环境变量中设置 `CLIP_MODEL`（例如 `google/siglip2-base-patch16-224`）
-- 为兼容旧配置，`ViT-B-16` / `ViT-L-14` / `ViT-H-14` 会自动映射到对应的 Transformers 模型
+- 为兼容旧配置，`ViT-B-16` / `ViT-L-14` / `ViT-H-14` 会自动映射到 `OFA-Sys/chinese-clip-vit-*` 系列模型
+- 国内环境如无法下载模型，可设置 `HF_ENDPOINT=https://hf-mirror.com`
 - 执行 `python server.py` ，启动服务
 
 > paddlepaddle-gpu 安装请根据CUDA版本 
