@@ -109,7 +109,9 @@ def get_normalized_image_features(image_obj):
 
 
 def get_normalized_text_features(text):
-    inputs = clip_processor(text=[text], return_tensors="pt", padding=True, truncation=True)
+    # SigLIP2 requires padding="max_length" with max_length=64 (training config);
+    # other CLIP-like models work fine with max_length padding too.
+    inputs = clip_processor(text=[text], return_tensors="pt", padding="max_length", max_length=64, truncation=True)
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.inference_mode():
         if hasattr(clip_model, "get_text_features"):
